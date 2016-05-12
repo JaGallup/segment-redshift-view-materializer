@@ -18,9 +18,9 @@ address = sa_url.URL(
     port=server['port'],
     database=server['database']
 )
-engine = create_engine(address, echo=True)
+engine = create_engine(address)
 
 conn = engine.connect()
 
 for schema in schemas:
-    sm.materialize(conn, engine, schema)
+    sm.materialize(conn, engine, schema['name'], schema['users'], schema['properties'])

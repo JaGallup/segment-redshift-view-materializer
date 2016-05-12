@@ -42,12 +42,12 @@ def s_create_table_as(element, compiler, **kwargs):
     return text
 
 
-def materialize(connection, engine, schema):
+def materialize(connection, engine, schema_name, schema_users, schema_properties):
     trans = connection.begin()
     try:
-        create_event_union(connection, engine, schema)
-        create_sessions(connection, engine, schema)
-        create_event_facts(connection, engine, schema)
+        create_event_union(connection, engine, schema_name, schema_users, schema_properties)
+        create_sessions(connection, engine, schema_name, schema_users, schema_properties)
+        create_event_facts(connection, engine, schema_name, schema_users, schema_properties)
         trans.commit()
     except:
         trans.rollback()
@@ -56,14 +56,14 @@ def materialize(connection, engine, schema):
         trans.close()
 
 
-def create_event_union(connection, engine, schema):
+def create_event_union(connection, engine, schema_name, schema_users, schema_properties):
     meta = MetaData(engine)
     pages = Table('pages', meta, autoload=True,
                   autoload_with=connection,
-                  schema=schema)
+                  schema=schema_name)
     tracks = Table('tracks', meta, autoload=True,
                    autoload_with=connection,
-                   schema=schema)
+                   schema=schema_name)
     s1_columns = [
         pages.c.id,
         pages.c.anonymous_id,
@@ -79,11 +79,13 @@ def create_event_union(connection, engine, schema):
         literal('tracks').label('event_source')
     ]
     for c in pages.c:
-        if 'context_' in c.name:
-            s1_columns.insert(len(s1_columns) - 1, c)
+        for prop in schema_properties:
+            if prop in c.name or 'context_' in c.name:
+                s1_columns.insert(len(s1_columns) - 1, c)
     for c in tracks.c:
-        if 'context_' in c.name:
-            s2_columns.insert(len(s2_columns) - 1, c)
+        for prop in schema_properties:
+            if prop in c.name or 'context_' in c.name:
+                s2_columns.insert(len(s2_columns) - 1, c)
     s1 = select(s1_columns)
     s2 = select(s2_columns)
     union = union_all(s1, s2)
@@ -102,20 +104,22 @@ def create_event_union(connection, engine, schema):
     ]
     trans = connection.begin()
     try:
-        Table('event_union', meta, schema=schema).drop(engine, checkfirst=True)
-        create_table = CreateTableAs(events, '{0}.event_union'.format(schema), '(1)', '(3)')
+        Table('event_union', meta, schema=schema_name).drop(engine, checkfirst=True)
+        create_table = CreateTableAs(events, '{0}.event_union'.format(schema_name), '(1)', '(3)')
         connection.execute(create_table)
+        grant_select = 'GRANT SELECT ON ' + schema_name + '.event_union TO ' + schema_users + ';'
+        connection.execute(grant_select)
         trans.commit()
     except:
         trans.rollback()
         raise
 
 
-def create_sessions(connection, engine, schema):
+def create_sessions(connection, engine, schema_name, schema_users, schema_properties):
     meta = MetaData(engine)
     event_union = Table('event_union', meta, autoload=True,
                         autoload_with=connection,
-                        schema=schema)
+                        schema=schema_name)
     columns = [
         (
             func.row_number().over(
@@ -135,32 +139,35 @@ def create_sessions(connection, engine, schema):
         ).label('next_session_start_at'),
     ]
     for c in event_union.c:
-        if 'context_' in c.name:
-            columns.insert(len(columns), c)
+        for prop in schema_properties:
+            if prop in c.name or 'context_' in c.name:
+                columns.insert(len(columns), c)
     trans = connection.begin()
     try:
-        Table('sessions', meta, schema=schema).drop(engine, checkfirst=True)
-        create_table = CreateTableAs(columns, '{0}.sessions'.format(schema), '(1)', '(3)').where(
+        Table('sessions', meta, schema=schema_name).drop(engine, checkfirst=True)
+        create_table = CreateTableAs(columns, '{0}.sessions'.format(schema_name), '(1)', '(3)').where(
             or_(
                 event_union.c.idle_time_minutes > 30,
                 event_union.c.idle_time_minutes == None
             )
         )
         connection.execute(create_table)
+        grant_select = 'GRANT SELECT ON ' + schema_name + '.sessions TO ' + schema_users + ';'
+        connection.execute(grant_select)
         trans.commit()
     except:
         trans.rollback()
         raise
 
 
-def create_event_facts(connection, engine, schema):
+def create_event_facts(connection, engine, schema_name, schema_users, schema_properties):
     meta = MetaData(engine)
     event_union = Table('event_union', meta, autoload=True,
                         autoload_with=connection,
-                        schema=schema)
+                        schema=schema_name)
     sessions = Table('sessions', meta, autoload=True,
                      autoload_with=connection,
-                     schema=schema)
+                     schema=schema_name)
     columns = [
         event_union.c.id,
         event_union.c.anonymous_id,
@@ -168,7 +175,6 @@ def create_event_facts(connection, engine, schema):
         sessions.c.session_id,
         sessions.c.session_sequence_number,
         sessions.c.session_start_at,
-        sessions.c.context_ip,
         event_union.c.event,
         event_union.c.event_source,
         sessions.c.context_page_referrer.label('session_referrer'),
@@ -182,11 +188,13 @@ def create_event_facts(connection, engine, schema):
                 event_union.c.event_source
             ],
             order_by=event_union.c.received_at
-        ).label('source_sequence_number')
+        ).label('source_sequence_number'),
+        event_union.c.idle_time_seconds
     ]
     for c in event_union.c:
-        if 'context_page' in c.name:
-            columns.insert(len(columns), c)
+        for prop in schema_properties:
+            if prop in c.name or ('context_' in c.name and 'campaign' not in c.name):
+                columns.insert(len(columns), c)
     for c in sessions.c:
         if 'context_campaign' in c.name:
             columns.insert(len(columns), c)
@@ -202,9 +210,11 @@ def create_event_facts(connection, engine, schema):
              )
     trans = connection.begin()
     try:
-        Table('event_facts', meta, schema=schema).drop(engine, checkfirst=True)
-        create_table = CreateTableAs(columns, '{0}.event_facts'.format(schema), '(1)', '(3)').select_from(j)
+        Table('event_facts', meta, schema=schema_name).drop(engine, checkfirst=True)
+        create_table = CreateTableAs(columns, '{0}.event_facts'.format(schema_name), '(1)', '(3)').select_from(j)
         connection.execute(create_table)
+        grant_select = 'GRANT SELECT ON ' + schema_name + '.event_facts TO ' + schema_users + ';'
+        connection.execute(grant_select)
         trans.commit()
     except:
         trans.rollback()

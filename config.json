@@ -7,7 +7,23 @@
 		"database": "db"
 	},
 	"schemas": [
-		"one",
-		"two"
+		{
+			"name": "one",
+			"users": "public",
+			"properties": [
+				"user_id",
+				"name",
+				"category"
+			]
+		},
+		{
+			"name": "two",
+			"users": "public",
+			"properties": [
+				"user_id",
+				"name",
+				"category"
+			]
+		}
 	]
 }
